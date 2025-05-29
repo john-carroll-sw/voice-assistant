@@ -1,0 +1,254 @@
+Tuesday, December 17, 2024
+Add browser speech input & output to your app
+One of the amazing benefits of modern machine learning is that computers can reliably turn text into speech, or transcribe speech into text, across multiple languages and accents. We can then use those capabilities to make our web apps more accessible for anyone who has a situational, temporary, or chronic issue that makes typing difficult. That describes so many people - for example, a parent holding a squirmy toddler in their hands, an athlete with a broken arm, or an individual with Parkinson's disease.
+
+There are two approaches we can use to add speech capabilites to our apps:
+
+Use the built-in browser APIs: the SpeechRecognition API and SpeechSynthesis API.
+Use a cloud-based service, like the Azure Speech API.
+Which one to use? The great thing about the browser APIs is that they're free and available in most modern browsers and operating systems. The drawback of the APIs is that they're often not as powerful and flexible as cloud-based services, and the speech output often sounds much more robotic. There are also a few niche browser/OS combos where the built-in APIs don't work, like SpeechRecognition on Microsoft Edge on a Mac M1. That's why we decided to add both options to azure-search-openai-demo, to give developers the option to decide for themselves.
+
+In this post, I'm going to show you how to add speech capabilities using the free built-in browser APIs, since free APIs are often easier to get started with, and it's important to do what we can to improve the accessibility of our apps. The GIF below shows the end result, a chat app with both speech input and output buttons:
+
+GIF of speech input and output for a chat app
+All of the code described in this post is part of openai-chat-vision-quickstart, so you can grab the full code yourself after seeing how it works.
+
+Speech input with SpeechRecognition API
+To make it easier to add a speech input button to any app, I'm wrapping the functionality inside a custom HTML element, SpeechInputButton. First I construct the speech input button element with an instance of the SpeechRecognition API, making sure to use the browser's preferred language if any are set:
+
+class SpeechInputButton extends HTMLElement {
+  constructor() {
+    super();
+    this.isRecording = false;
+    const SpeechRecognition =
+      window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      this.dispatchEvent(
+        new CustomEvent("speecherror", {
+          detail: { error: "SpeechRecognition not supported" },
+        })
+      );
+      return;
+    }
+    this.speechRecognition = new SpeechRecognition();
+    this.speechRecognition.lang = navigator.language || navigator.userLanguage;
+    this.speechRecognition.interimResults = false;
+    this.speechRecognition.continuous = true;
+    this.speechRecognition.maxAlternatives = 1;
+  }
+Then I define the connectedCallback() method that will be called whenever this custom element has been added to the DOM. When that happens, I define the inner HTML to render a button and attach event listeners for both mouse and keyboard events. Since we want this to be fully accessible, keyboard support is important.
+
+connectedCallback() {
+  this.innerHTML = `
+        <button class="btn btn-outline-secondary" type="button" title="Start recording (Shift + Space)">
+            <i class="bi bi-mic"></i>
+        </button>`;
+  this.recordButton = this.querySelector('button');
+  this.recordButton.addEventListener('click', () => this.toggleRecording());
+  document.addEventListener('keydown', this.handleKeydown.bind(this));
+}
+  
+handleKeydown(event) {
+  if (event.key === 'Escape') {
+    this.abortRecording();
+  } else if (event.key === ' ' && event.shiftKey) { // Shift + Space
+    event.preventDefault();
+    this.toggleRecording();
+  }
+}
+  
+toggleRecording() {
+  if (this.isRecording) {
+    this.stopRecording();
+  } else {
+    this.startRecording();
+  }
+}
+The majority of the code is in the startRecording function. It sets up a listener for the "result" event from the SpeechRecognition instance, which contains the transcribed text. It also sets up a listener for the "end" event, which is triggered either automatically after a few seconds of silence (in some browsers) or when the user ends the recording by clicking the button. Finally, it sets up a listener for any "error" events. Once all listeners are ready, it calls start() on the SpeechRecognition instance and styles the button to be in an active state.
+
+startRecording() {
+  if (this.speechRecognition == null) {
+    this.dispatchEvent(
+      new CustomEvent("speech-input-error", {
+        detail: { error: "SpeechRecognition not supported" },
+      })
+    );
+  }
+
+  this.speechRecognition.onresult = (event) => {
+    let input = "";
+    for (const result of event.results) {
+      input += result[0].transcript;
+    }
+    this.dispatchEvent(
+      new CustomEvent("speech-input-result", {
+        detail: { transcript: input },
+      })
+    );
+  };
+
+  this.speechRecognition.onend = () => {
+    this.isRecording = false;
+    this.renderButtonOff();
+    this.dispatchEvent(new Event("speech-input-end"));
+  };
+
+  this.speechRecognition.onerror = (event) => {
+    if (this.speechRecognition) {
+      this.speechRecognition.stop();
+      if (event.error == "no-speech") {
+        this.dispatchEvent(
+          new CustomEvent("speech-input-error", {
+            detail: {error: "No speech was detected. Please check your system audio settings and try again."},
+         }));
+      } else if (event.error == "language-not-supported") {
+        this.dispatchEvent(
+          new CustomEvent("speech-input-error", {
+            detail: {error: "The selected language is not supported. Please try a different language.",
+        }}));
+      } else if (event.error != "aborted") {
+        this.dispatchEvent(
+          new CustomEvent("speech-input-error", {
+            detail: {error: "An error occurred while recording. Please try again: " + event.error},
+        }));
+      }
+    }
+  };
+
+  this.speechRecognition.start();
+  this.isRecording = true;
+  this.renderButtonOn();
+}
+If the user stops the recording using the keyboard shortcut or button click, we call stop() on the SpeechRecognition instance. At that point, anything the user had said will be transcribed and become available via the "result" event.
+
+stopRecording() {
+  if (this.speechRecognition) {
+    this.speechRecognition.stop();
+  }
+}
+Alternatively, if the user presses the Escape keyboard shortcut, we instead call abort() on the SpeechRecognition instance, which stops the recording and does not send any previously untranscribed speech over.
+
+abortRecording() {
+  if (this.speechRecognition) {
+    this.speechRecognition.abort();
+  }
+}
+Once the custom HTML element is fully defined, we register it with the desired tag name, speech-input-button:
+
+customElements.define("speech-input-button", SpeechInputButton);
+To use the custom speech-input-button element in a chat application, we add it to the HTML for the chat form:
+
+
+  <speech-input-button></speech-input-button>
+  <input id="message" name="message" class="form-control form-control-sm" type="text" rows="1"></input>
+Then we attach an event listener for the custom events dispatched by the element, and we update the input text field with the transcribed text:
+
+const speechInputButton = document.querySelector("speech-input-button");
+speechInputButton.addEventListener("speech-input-result", (event) => {
+    messageInput.value += " " + event.detail.transcript.trim();
+    messageInput.focus();
+});
+You can see the full custom HTML element code in speech-input.js and the usage in index.html. There's also a fun pulsing animation for the button's active state in styles.css.
+
+Speech output with SpeechSynthesis API
+Once again, to make it easier to add a speech output button to any app, I'm wrapping the functionality inside a custom HTML element, SpeechOutputButton. When defining the custom element, we specify an observed attribute named "text", to store whatever text should be turned into speech when the button is clicked.
+
+class SpeechOutputButton extends HTMLElement {
+  static observedAttributes = ["text"];
+In the constructor, we check to make sure the SpeechSynthesis API is supported, and remember the browser's preferred language for later use.
+
+constructor() {
+  super();
+  this.isPlaying = false;
+  const SpeechSynthesis = window.speechSynthesis || window.webkitSpeechSynthesis;
+  if (!SpeechSynthesis) {
+    this.dispatchEvent(
+      new CustomEvent("speech-output-error", {
+        detail: { error: "SpeechSynthesis not supported" }
+    }));
+    return;
+  }
+  this.synth = SpeechSynthesis;
+  this.lngCode = navigator.language || navigator.userLanguage;
+}
+When the custom element is added to the DOM, I define the inner HTML to render a button and attach mouse and keyboard event listeners:
+
+connectedCallback() {
+    this.innerHTML = `
+            <button class="btn btn-outline-secondary" type="button">
+                <i class="bi bi-volume-up"></i>
+            </button>`;
+    this.speechButton = this.querySelector("button");
+    this.speechButton.addEventListener("click", () =>
+      this.toggleSpeechOutput()
+    );
+    document.addEventListener('keydown', this.handleKeydown.bind(this));
+}
+The majority of the code is in the toggleSpeechOutput function. If the speech is not yet playing, it creates a new SpeechSynthesisUtterance instance, passes it the "text" attribute, and sets the language and audio properties. It attempts to use a voice that's optimal for the desired language, but falls back to "en-US" if none is found. It attaches event listeners for the start and end events, which will change the button's style to look either active or unactive. Finally, it tells the SpeechSynthesis API to speak the utterance.
+
+toggleSpeechOutput() {
+    if (!this.isConnected) {
+      return;
+    }
+    const text = this.getAttribute("text");
+    if (this.synth != null) {
+      if (this.isPlaying || text === "") {
+        this.stopSpeech();
+        return;
+      }
+
+      // Create a new utterance and play it.
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = this.lngCode;
+      utterance.volume = 1;
+      utterance.rate = 1;
+      utterance.pitch = 1;
+
+      let voice = this.synth
+        .getVoices()
+        .filter((voice) => voice.lang === this.lngCode)[0];
+      if (!voice) {
+        voice = this.synth
+          .getVoices()
+          .filter((voice) => voice.lang === "en-US")[0];
+      }
+      utterance.voice = voice;
+
+      if (!utterance) {
+        return;
+      }
+
+      utterance.onstart = () => {
+        this.isPlaying = true;
+        this.renderButtonOn();
+      };
+
+      utterance.onend = () => {
+        this.isPlaying = false;
+        this.renderButtonOff();
+      };
+      
+      this.synth.speak(utterance);
+    }
+  }
+When the user no longer wants to hear the speech output, indicated either via another press of the button or by pressing the Escape key, we call cancel() from the SpeechSynthesis API.
+
+stopSpeech() {
+      if (this.synth) {
+          this.synth.cancel();
+          this.isPlaying = false;
+          this.renderButtonOff();
+      }
+  }
+Once the custom HTML element is fully defined, we register it with the desired tag name, speech-output-button:
+
+customElements.define("speech-output-button", SpeechOutputButton);
+To use this custom speech-output-button element in a chat application, we construct it dynamically each time that we've received a full response from an LLM, and call setAttribute to pass in the text to be spoken:
+
+const speechOutput = document.createElement("speech-output-button");
+speechOutput.setAttribute("text", answer);
+messageDiv.appendChild(speechOutput);
+You can see the full custom HTML element code in speech-output.js and the usage in index.html. This button also uses the same pulsing animation for the active state, defined in styles.css.
+
+Acknowledgments
+I want to give a huge shout-out to John Aziz for his amazing work adding speech input and output to the azure-search-openai-demo, as that was the basis for the code I shared in this blog post.
